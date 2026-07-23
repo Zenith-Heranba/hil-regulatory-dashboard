@@ -6,15 +6,15 @@ const store = require('./lib/store');
 const { EDITABLE_FIELDS } = require('./lib/rowid');
 
 const app = express();
-app.set('trust proxy', 1); // Railway sits behind a proxy; needed for secure cookies
+app.set('trust proxy', 1); // Vercel sits behind a proxy; needed for secure cookies
 
 const VIEWER_PASSWORD = process.env.VIEWER_PASSWORD || '';
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || '';
-const SESSION_SECRET = process.env.SESSION_SECRET || 'change-me-in-railway-env-vars';
+const SESSION_SECRET = process.env.SESSION_SECRET || 'change-me-in-vercel-env-vars';
 const INGEST_API_KEY = process.env.INGEST_API_KEY || '';
 
 if (!VIEWER_PASSWORD || !ADMIN_PASSWORD) {
-  console.warn('WARNING: VIEWER_PASSWORD / ADMIN_PASSWORD not set — set them in Railway env vars before sharing the link.');
+  console.warn('WARNING: VIEWER_PASSWORD / ADMIN_PASSWORD not set — set them in Vercel project env vars before sharing the link.');
 }
 
 app.use(express.json({ limit: '25mb' })); // daily ingest payload can be a few hundred KB
@@ -73,10 +73,15 @@ app.get('/api/session', requireAuth, (req, res) => {
   res.json({ role: req.session.role });
 });
 
-app.get('/api/data', requireAuth, (req, res) => {
-  const merged = store.getMerged();
-  merged.meta._role = req.session.role;
-  res.json(merged);
+app.get('/api/data', requireAuth, async (req, res) => {
+  try {
+    const merged = await store.getMerged();
+    merged.meta._role = req.session.role;
+    res.json(merged);
+  } catch (err) {
+    console.error('GET /api/data failed:', err);
+    res.status(500).json({ error: 'Failed to load data' });
+  }
 });
 
 app.post('/api/data/edit', requireAdmin, async (req, res) => {
@@ -103,12 +108,25 @@ app.post('/api/data/ingest', requireIngestKey, async (req, res) => {
   if (!newBase || !newBase.completed_registrations || !newBase.data_generation || !newBase.completeness_matrix) {
     return res.status(400).json({ error: 'Payload does not look like a valid dataset (missing expected top-level keys)' });
   }
-  await store.setBase(newBase);
-  res.json({ ok: true, rowCounts: store.rowCounts(newBase), overridesCount: store.overridesCount() });
+  try {
+    await store.setBase(newBase);
+    const overridesCount = await store.overridesCount();
+    res.json({ ok: true, rowCounts: store.rowCounts(newBase), overridesCount });
+  } catch (err) {
+    console.error('POST /api/data/ingest failed:', err);
+    res.status(500).json({ error: 'Failed to store dataset' });
+  }
 });
 
 app.use(express.static(path.join(__dirname, 'public')));
 app.get('*', (req, res) => res.sendFile(path.join(__dirname, 'public', 'index.html')));
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`HIL dashboard server listening on :${PORT}`));
+// Vercel wraps an exported Express app as a serverless function automatically — it must
+// NOT call app.listen() itself. Locally (and on Railway, if this file is ever reused
+// there), fall back to listening normally.
+if (process.env.VERCEL) {
+  module.exports = app;
+} else {
+  const PORT = process.env.PORT || 3000;
+  app.listen(PORT, () => console.log(`HIL dashboard server listening on :${PORT}`));
+}
